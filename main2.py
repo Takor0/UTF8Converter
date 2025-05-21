@@ -6,9 +6,7 @@ import logging
 from typing import Union
 
 import chardet
-
 from tqdm import tqdm
-
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +14,46 @@ ALLOWED_EXTENSIONS = {".txt"}
 SAMPLE_SIZE = 1024 * 100
 
 
-def validate_file(src: Union[Path, str], should_exist: bool = True) -> Path:
+def validate_input_file(src: Union[Path, str]) -> Path:
+    """
+    Validate the input file.
+    :param src:
+    :return: validated file path
+    """
     path = Path(src)
-    if should_exist and not path.exists():
+    if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    if path.is_dir():
+    if not path.is_file():
         raise IsADirectoryError(f"Path is not a file: {path}")
     if path.suffix.lower() not in ALLOWED_EXTENSIONS:
         raise ValueError(f"Invalid file extension: {path.suffix}")
-
     return path
+
+
+def prepare_output_path(
+    src: Path, dst: Union[Path, str], create_output_dir: bool
+) -> Path:
+    """
+    Create and validate the output path.
+    :param src: path to the source file
+    :param dst: path to the destination file or directory
+    :param create_output_dir: flag to create output directory if it does not exist
+    :return: validated output path
+    """
+    dst_path = Path(dst)
+    if dst_path.exists() and dst_path.is_dir():
+        out = dst_path / src.name
+    elif create_output_dir and not dst_path.exists():
+        dst_path.mkdir(parents=True, exist_ok=True)
+        out = dst_path / src.name
+    else:
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        out = dst_path
+    if out.suffix.lower() not in ALLOWED_EXTENSIONS:
+        raise ValueError(
+            f"Output must be file with {ALLOWED_EXTENSIONS} extension: {out}"
+        )
+    return out
 
 
 class UTF8Converter:
@@ -37,20 +65,17 @@ class UTF8Converter:
         create_output_dir: bool = False,
     ):
         self.sample_size = sample_size
-        self.input_file = validate_file(input_file)
-        self.output_file = validate_file(output_file, False)
-
-        if create_output_dir:
-            logger.debug(f"Creating output directory: {self.output_file.parent}")
-            self.output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        if not self.output_file.parent.exists():
-            raise FileNotFoundError(
-                f"Output directory does not exist: {self.output_file.parent}"
-            )
+        self.input_file = validate_input_file(input_file)
+        self.output_file = prepare_output_path(
+            src=self.input_file, dst=output_file, create_output_dir=create_output_dir
+        )
 
     @property
     def encoding_confidence(self) -> tuple[str | None, float]:
+        """
+        Detect the encoding of the input file.
+        :return: encoding and confidence
+        """
         if self.input_file.stat().st_size <= self.sample_size:
             data = self.input_file.read_bytes()
         else:
@@ -58,9 +83,13 @@ class UTF8Converter:
                 data = f.read(self.sample_size)
 
         detected = chardet.detect(data)
-        return detected.get("encoding"), detected.get("confidence")
+        return detected.get("encoding"), detected.get("confidence", 0.0)
 
-    def convert(self) -> Path:
+    def convert(self):
+        """
+        Convert the input file to UTF-8 encoding.
+        :return:
+        """
         enc, confidence = self.encoding_confidence
 
         if not enc:
@@ -69,9 +98,10 @@ class UTF8Converter:
         self.output_file.write_text(text, encoding="utf-8")
 
         logger.debug(
-            f"File converted successfully (encoding: {enc} confidence: {confidence}): {self.input_file} -> {self.output_file}"
+            f"File converted successfully "
+            f"(encoding: {enc} confidence: {confidence:.2f}): "
+            f"{self.input_file} -> {self.output_file}"
         )
-        return self.output_file
 
 
 def batch_processing(
@@ -79,6 +109,13 @@ def batch_processing(
     use_processes: bool = False,
     max_workers: int = None,
 ) -> None:
+    """
+    Process files in batches using threads or processes.
+    :param converters: list of UTF8Converter instances
+    :param use_processes: flag to use multiprocessing
+    :param max_workers: number of worker threads or processes
+    :return:
+    """
     Executor = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
     with Executor(max_workers=max_workers) as executor, tqdm(
         total=len(converters),
@@ -108,13 +145,20 @@ def make_converters(
     sample_size: int = SAMPLE_SIZE,
     create_output_dir: bool = False,
 ) -> list[UTF8Converter]:
+    """
+    Create a list of UTF8Converter instances based on the source and destination paths.
+    :param src: source file or directory
+    :param dst: destination file or directory
+    :param sample_size: sample size for encoding detection
+    :param create_output_dir: flag to create output directory if it does not exist
+    :return:
+    """
     path = Path(src)
-    dst = Path(dst)
     if path.is_dir():
         return [
             UTF8Converter(
                 input_file=file,
-                output_file=dst / file.name,
+                output_file=dst,
                 sample_size=sample_size,
                 create_output_dir=create_output_dir,
             )
@@ -123,7 +167,7 @@ def make_converters(
     else:
         return [
             UTF8Converter(
-                input_file=src,
+                input_file=path,
                 output_file=dst,
                 sample_size=sample_size,
                 create_output_dir=create_output_dir,
@@ -132,8 +176,6 @@ def make_converters(
 
 
 if __name__ == "__main__":
-    # Example usage
-
     parser = argparse.ArgumentParser(description="Convert files to UTF-8")
     parser.add_argument(
         "-s", "--src", type=str, required=True, help="Source file or directory"
@@ -152,7 +194,7 @@ if __name__ == "__main__":
         help="Number of worker threads",
     )
     parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Logging verbosity level"
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
     )
     parser.add_argument(
         "--sample_size",
@@ -166,6 +208,7 @@ if __name__ == "__main__":
         help="Create output directory if it does not exist",
     )
     args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(message)s",
@@ -178,5 +221,9 @@ if __name__ == "__main__":
         sample_size=args.sample_size,
         create_output_dir=args.create_output_dir,
     )
-
-    batch_processing(converters, use_processes=args.processes, max_workers=args.workers)
+    if not converters:
+        logger.warning("No .txt files found to convert.")
+    else:
+        batch_processing(
+            converters, use_processes=args.processes, max_workers=args.workers
+        )
